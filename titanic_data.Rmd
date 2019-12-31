@@ -1,0 +1,746 @@
+---
+title: "Titanic_Data"
+author: "Erik Lee"
+date: "May 30, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+First, we load the files into our current working directory.
+
+```{r}
+path = getwd()
+user = unlist(strsplit(path, "/"))[3]
+if(user == "Erik"){
+  setwd("C:/Users/Erik/Desktop/TitanicData")
+} else if(user == "ejl42"){
+  setwd("C:/Users/ejl42/Desktop/TitanicData")
+}
+
+test = read.csv("test.csv")
+train = read.csv("train.csv")
+genders = read.csv("gender_submission.csv")
+
+# Creating a separate copy of the training data called train_dummy to test and compare with train
+train_dummy = data.frame(train)
+```
+
+Next, we need to check the data fields for any null values or missing data. So we check each observation for missing values in any of the variables. At this point we are unaware which variables are important for our classification, but we can narrow down the sample size for our classification method. 
+
+```{r}
+nulls = c()
+empties = c()
+for(col in 1:ncol(train)){
+  nulls = c(nulls, sum(is.na(train[,col])))
+  empties = c(empties, sum(train[,col] == ""))
+}
+
+vars = colnames(train)
+df.nulls = data.frame(Variables=vars, NullCount=nulls, EmptyCellCount=empties)
+df.nulls
+
+train_dummy = train_dummy[!is.na(train_dummy$Age),]
+```
+
+According to the the dataframe reporting the null counts for each variable, Age has 177 null observations. We remove the observations (rows of the dataframe) with the last line in this code block and save the modified sample set. Still we are unsure of the importance of the Age variable to our classification model, and we still have the original train dataset in case we find Age to be unimportant and we want to train on the unadultered dataset instead.
+
+In addition, a separate column was added for variables with factor columns. We see that Cabin is missing for 687 observations and Embark is missing for 2 observations. We can remove these later if we find that Cabin and Embark are important modeling variables. 
+
+```{r}
+sex_rownames = c("Survived", "Died")
+
+male_survived = sum(train_dummy$Sex == "male" & train_dummy$Survived == 1)
+male_died = sum(train_dummy$Sex == "male" & train_dummy$Survived == 0)
+female_survived = sum(train_dummy$Sex == "female" & train_dummy$Survived == 1)
+female_died = sum(train_dummy$Sex == "female" & train_dummy$Survived == 0)
+
+male = c(male_survived, male_died)
+female = c(female_survived, female_died)
+
+
+df.freq = data.frame(Male=male, Female=female)
+rownames(df.freq) = sex_rownames
+df.freq
+
+observed = c(male_survived, female_survived, male_died, female_died)
+expected = c()
+
+for(R in 1:nrow(df.freq)){
+  for(C in 1:ncol(df.freq)){
+    E = (sum(df.freq[R, ])*sum(df.freq[,C]))/(nrow(train_dummy))
+    expected = c(expected, E)
+  }
+}
+
+# calculate Pearson's Chi-sq random variable
+X2 = sum((observed-expected)^2/expected)
+paste0("chi-sq value = ", X2)
+df = (nrow(df.freq)-1)*(ncol(df.freq)-1)
+p = 1-pchisq(X2,df)
+paste0("p-value = ", p)
+
+Bin_Sex = rep(0, nrow(train_dummy))
+Bin_Sex[train_dummy$Sex == "female"] = 1
+chisq.test(Bin_Sex, train_dummy$Survived, correct=FALSE)
+
+```
+
+We can perform this Chi-Squared test for each categorical variable. Before we conduct any further tests, it may be useful to remove variables/columns that are used as unique identifiers for passangers. While it is important to track the unique information of each observation (person in this case), these unique identifiers do not help train our prediction model. We can proceed by removing categories such as Passanger ID, Name, and Ticket. We can also omit Cabin since most of the entries are missing for each observation. 
+
+On the Titanic Competition page on Kaggle (https://www.kaggle.com/c/titanic/data), there is a data dictionary providing information about each variable and meaning. Survival maps 0 = No and 1 = Yes. For Pclass, this represnts ticket class with 1=First, 2=Second, 3=Third. Sex and Age are self explanatory. Sibsp represents number of siblings/spouses on board and Parch represents number of parents/children on board. Ticket, fare, and Cabin are self explanatory. And Embarked represents which port they left (C = Cherbourg, Q = Queenstown, S = Southampton).
+
+Remember back that the last variable, Embarked, is missing for 2 observations. It is also unclear from a practical standpoint if where a person embarked affects the likelihood of survival in such a dire situation as the Titanic's sinking. Further, I am unsure of the three port categories and the socioeconomic status of each city. It may be that Embarked is similar to Pclass in that "wealthier" ports see more survival over "poorer" ports. We will see when we do further variable selection on our data model.
+
+```{r}
+# check the non null counts for Cabin
+#levels(train_dummy$Cabin)
+paste("Percent of Missing Reports for Cabin: ", sum(train_dummy$Cabin == "")/length(train_dummy$Cabin))
+
+# just checking that there are many unique categories for Ticket
+paste("Number of Unique Ticket Fields: ", length(levels(train_dummy$Ticket)))
+
+train_cond = data.frame(train_dummy[, -c(1,4,9,11)])
+train_cond$Sex = as.numeric(train_cond$Sex)-1 # 1 = male and 0 = female
+```
+
+Now that we have narrowed down the variables/columns we are interested in, we can proceed with the Chi-Square test analysis to see which variables are associated with the outcome of Survival. Instead of manually typing out each scenario, we will develop a generic function called Chi-Sq that will take in two numeric vectors (one variable and one outcome) and return the chi-square statistic as well as the p-value. For these tests we will specify the signficiance level at 0.05 default, but this may be modified in the function.
+
+```{r}
+chi.sq.analysis = function(variable, outcome, sig.lvl=0.05, showRFunctionResults=FALSE){
+  variable = as.numeric(variable)
+  outcome = as.numeric(outcome)
+  r = length(unique(variable))
+  c = length(unique(outcome))
+  
+  vars = sort(unique(variable), decreasing=TRUE)
+  outs = sort(unique(outcome), decreasing=TRUE)
+  
+  deg.free = (r-1)*(c-1)
+  
+  df = NULL
+  col_vals = numeric()
+  for(var in vars){
+    for(out in outs){
+      col_vals = c(col_vals, sum(variable == var & outcome == out))
+    }
+    df = cbind(df, col_vals)
+    col_vals = numeric()
+  }
+  grand_total = sum(colSums(df))
+  observed = numeric()
+  expected = numeric()
+  for(row in 1:nrow(df)){
+    for(col in 1:ncol(df)){
+      observed = c(observed, as.numeric(df[row,col]))
+      e = (sum(df[,col])*sum(df[row,]))/grand_total
+      expected = c(expected, e)
+    }
+  }
+  chi2 = sum((observed-expected)^2/expected)
+  p = 1-pchisq(chi2, df=deg.free)
+  reject.null = 0
+  print("Pearson's Chi-squared test function:")
+  print(paste("Chi-Sq Statistic = ", chi2))
+  print(paste("df = ", deg.free))
+  print(paste("Pre-Specified Significance Level: ", sig.lvl))
+  print(paste("p-value = ", p))
+  if(p < sig.lvl){
+    print(paste(p, " < ", sig.lvl, "... Test Passed."))
+    print("Conclusion: We can generalize that the variable and outcome are related in the larger population.")
+    reject.null = 1
+  }
+  else{
+    print(paste(p, " > ", sig.lvl, "... Test Failed."))
+    print("Conclusion: We cannot generalize that the variable and outcome are related in the larger population.")
+    #reject.null = FALSE
+  }
+  if(showRFunctionResults == TRUE){
+    chisq.test(x=variable, y=outcome, correct=FALSE)
+  }
+  vals = list("chi.stat" = chi2, "p.value" = p, "reject.null" = reject.null)
+  return(vals) # returns a vector with chi-squared statistic and p-value from Pearson's Chi-Sq Test
+}
+```
+
+Before we can do this analysis for the rest of the variables, notice that Age and Fair have many unique values according to individuals. This would cause our Chi-Squared function to get flustered and return unintelligable results. So we can perform an arbitrary grouping of Age and Fair to see if these categories affect survival. Let's do this:
+
+Age:
+- 1-15 = 1
+- 16-30 = 2
+- 31-45 = 3
+- 46-60 = 4
+- 61+ = 5
+
+Fare:
+- $0.00-$19.00 = 1
+- $20.00-$39.99 = 2
+- $40.00+ = 3
+
+```{r}
+summary(train_cond$Age)
+summary(train_cond$Fare)
+
+age = train_cond$Age
+
+years = rep(1, times=length(age))
+years[age >= 16 & age <= 30] = 2
+years[age >= 31 & age <= 45] = 3
+years[age >= 46 & age <= 60] = 4
+years[age >= 61] = 5
+
+fare = train_cond$Fare
+
+cost = rep(1, times=length(fare))
+cost[fare >= 20.00 & fare <= 39.99] = 2
+cost[fare >= 40.00] = 3
+```
+
+Now we can use this function in an iterative loop to check the remaining variables in the Condensed Training (train_cond) Dataset. We will store the results in a simple dataframe and show how each variable compares in Chi-Squared value and p-value from the Pearson's Chi-Squared Test.
+
+```{r}
+chi.values = c()
+p.values = c()
+reject.values = c()
+
+train_mirror = train_cond
+train_mirror$Age = years
+train_mirror$Fare = cost
+
+for(i in 2:7){
+  var = train_mirror[, i]
+  out = train_mirror[, 1]
+  print(colnames(train_mirror)[i])
+  res = chi.sq.analysis(variable = var, outcome = out)
+  chi.values = c(chi.values, res["chi.stat"])
+  p.values = c(p.values, res["p.value"])
+  #print(res["reject.null"])
+  if(res["reject.null"] == 1){
+    reject = "Yes"
+  }
+  else{
+    reject = "No"
+  }
+  reject.values = c(reject.values, reject)
+  cat("\n")
+}
+chi.values = as.vector(unlist(chi.values))
+p.values = as.vector(unlist(p.values))
+reject.values = as.vector(unlist(reject.values))
+
+category.names = colnames(train_mirror)[2:7]
+df.res = data.frame("Attribute" = category.names, "Chi-Sq.Stats" = chi.values, "P-Values" = p.values, "Reject Null?" = reject.values)
+df.res = df.res[order(-df.res$Chi.Sq.Stats), ]
+df.res
+
+```
+
+Above we have the results of the re-engineered Pearson's Chi-Squared Analysis (with no Yate's correction) for the attributes we are interested in the Titanic Data. Notice that the dataframe is ordered by descending values of the Chi-Squared statistic. This was arbitrarily done as we could have ordered by p-values as well. Fortunately, the Chi-Squared statistics and p-values follow a reverse "ascending" order where higher Chi-Squared value corresponds to lower p-value. This makes sense as a higher Chi-Square value indicates much more dispersion in the frequency between the expected values and observed values. The greater the dispersion, the more statiscially significant, aka more of an unusual case, this result becomes. 
+
+This also gives us a relative indication as to which attributes have greater dispersion from the expected survival frequency, with the assumption of the null hypothesis of independence/correlation of the categories. Sex and Passenger Class have the highest Chi-Square values and lowest p-values. If we make an intuative assumption, we may say that priority is given to women and wealthier passengers. By the same token, we would like to say that Age plays a factor where youngest passengers are given priority for life boats. However, we see that while we reject the null and may conclude a correlation between Survived and Age, it actually has the lowest Chi-Square value and highest p-value. But relative Chi-Square comparisons is not a conclusive metric for relation between outcome and variables. And so we have to find more evidence to support our cases with data modeling.
+
+Lets pause for comparison and use some visuals to see what our chi-square test is saying. Firstly, we need to understand what the goal of the test is. The null hypothesis says that the two categories, in this case sex and survival, are indepenedent. Put another way, the frequency of survival will be the same between the two sexes. The alternative hypothesis says that the two categories, sex and survival, are not independent. That is the frequency of suvival does vary between the two sexes. Let us see this with a stacked barplot.
+
+```{r}
+categories = table(train_cond$Survived, train_cond$Sex)
+rownames(categories) = c("Did Not Survive", "Survived")
+barplot(categories, main="Suvival Frequency Among Each Sex", xlab="Sex", ylab="Survived", col=c("forestgreen", "dodgerblue"), legend=rownames(categories))
+axis(1, at=1:2, labels=c("Female", "Male"))
+```
+
+Above we see the stacked barplot of Suvival Frequency Among Each Sex. We can see that if we dragged the Female bar up to a height equal to the Male count, while keeping the frequency the same, the Female bar has a larger proportion of survived compared to Did Not Survive. Although this inference is not apparent without some imagination and does not consititute concrete evidence, it is nice to see how the frequencies compare and how these frequencies display independence for our chi-squared test and hypothesis.
+
+The expected model for this Pearson's Chi-Square test is the distribution of survived and did not survive is equal between Male and Females. This implies via the Null Hypothesis that the two categories Sex and Survived are independent. However, we see based on the data that P-value is 0.000000e+00 and the graphs show greater proportion of surived for Female and greater proportion of Did Not Survive for Male, we can not support the Null Hypothesis that Sex and Survived are independent.
+
+Now we will graph the rest of the categories we suggest are related to Survived, which include Pclass, Fare, Parch, Sibsp, and Fare. We may return to add Embarked in a later section to see if the port which passengers entered contributes to Survival. This may play into the speculation that wealthier port areas consist of passengers who were given preferential treatment when evacuating the ship. Instead, we can use Fare as a proxy for this sort of speculation as port of embarkment can not easily control for wealthier or not as weathy patrons entering the ships. 
+
+```{r}
+par(mfrow=c(2, 3))
+for(i in 2:(length(train_mirror)-1)){
+  categories = table(train_mirror[,1], train_mirror[,i])
+  rownames(categories) = c("Did Not Survive", "Survived")
+  variable_name = colnames(train_mirror)[i]
+  names = c()
+  if(i == 3){
+    names = c("Female", "Male")
+  }
+  else if(i == 4){
+    names = c("0.01-15", "16-30", "31-45", "46-60", "61+")
+  }
+  else if(i == 7){
+    names = c("$0-20", "$21-40", "$40+")
+  }
+  barplot(categories, main=paste("Survival Frequency versus ", variable_name, sep=""), names.arg=names, xlab=variable_name, ylab="Survived", col=c("forestgreen", "dodgerblue"), legend=rownames(categories))
+  #axis(1, at=1:length(unique(train_mirror[,i])), labels=c(sort(unique(train_mirror[,i]))))
+}
+```
+
+We see in the barplots above infromation that mirrors the result of our previous Pearson's Chi-Squared Test. Recall that in the Chi-Squared test, we saw the rank order of the Chi-Square statistic from highest to lowest as Sex, Pclass, Fare, Parch, Sibsp, and Age. Similarly, if we look at the proportions displayed for each graph, we can see that some variables have clearer evidence against the Null Hypothesis of independence between Survived and the feature. Pclass, which had the second highest Chi-Squared statistic, shows difference between surival rate among the three classes. It seems that a larger proportion surived for Class 1 and 2 and larger proportion died for Class 3. We can see a similar story with Fare, where passengers who paid more had a higher proportion of survival as compared to lower priced tickets.
+
+
+Logistic Regression
+
+Now we will use Logistic Regression to model and predict survival rates with each variable combination. First let's start with using all of the variables to predict survival.
+
+```{r}
+install.packages("ISLR")
+library(ISLR)
+```
+
+
+```{r}
+train_mirror$Survived = as.factor(train_mirror$Survived)
+Survived = train_mirror$Survived
+Pclass = train_mirror$Pclass
+Sex = train_mirror$Sex
+Age = train_mirror$Age
+SibSp = train_mirror$SibSp
+Parch = train_mirror$Parch
+Fare = train_mirror$Fare
+
+glm.fit = glm(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare, data=train_mirror, family=binomial)
+summary(glm.fit)
+```
+
+```{r}
+coef(glm.fit)
+summary(glm.fit)$coef
+summary(glm.fit)$coef[,4]
+```
+
+Based on our summaries, we see that Parch and Fare have p-values greater than 0.05. This will be kept in mind while we continue to fit this Logistic model with all variables. In the next iteration of the model, we may choose to remove variables to improve prediction accuracy.
+
+Now we will use this Logistic model fit to make predictions on the data that was used to construct it. This will provide some accuracy to the model and allow us to compare its precision to other models that have variable selection.
+
+```{r}
+glm.probs = predict(glm.fit, type="response")
+glm.probs[1:10]
+
+glm.pred=rep("0", length(Survived))
+glm.pred[glm.probs > 0.5] = "1"
+res = table(glm.pred, Survived)
+res
+
+# accuracy
+(res[1,1]+res[2,2])/sum(res)
+```
+
+We see here that prediciton accuray for our first logistic model is about 79%. This is solid for the model but consists of heavy bias since the predictions were done on the same data used to train the model. We will worry about bias later after variable selection and choosing the right classifier for the Titanic data; we plan to weigh Logistic regression against LDA and SVM.
+
+For now, let us select out Parch and Fare since they were over the p-value 0.05 threshold. And we will look at the overall prediction accuracy same as we did for the first iteration.
+
+```{r}
+glm.fit.2 = glm(Survived~Pclass+Sex+Age+SibSp, data=train_mirror, family=binomial)
+coef(glm.fit.2)
+summary(glm.fit.2)$coef
+```
+
+```{r}
+glm.probs.2 = predict(glm.fit.2, type="response")
+glm.probs.2[1:10]
+
+glm.pred.2 = rep("0", length(Survived))
+glm.pred.2[glm.probs.2 > 0.5] = "1"
+res2 = table(glm.pred.2, Survived)
+res2
+
+accuracy2 = (res2[1,1]+res2[2,2])/sum(res2)
+accuracy2
+```
+
+Interestingly, we see that selecting against Parch and Fare had a lower level of accuracy, but essentially the same percent of approximately 79%. 
+
+Let's try one more prediction without SibSp and see if any result differs from selecting backward.
+
+```{r}
+glm.fit.3 = glm(Survived~Pclass+Sex+Age, data=train_mirror, family=binomial)
+glm.probs.3 = predict(glm.fit.3, type="response")
+glm.pred.3 = rep("0", length(Survived))
+glm.pred.3[glm.probs.3 > 0.5] = "1"
+res3 = table(glm.pred.3, Survived)
+res3
+(res3[1,1]+res3[2,2])/sum(res3)
+```
+
+Interestingly this is the same level of accuracy as the version with SibSp. This may mean that SibSp is not important to the prediction model. Let us try adding in the other removed to see where the improved accuracy comes from.
+
+Since we are running multiple iterations of the same test, let's create a function that will return the accuracy of a Logisitc regression doing predictions on the data it was trained with.
+
+```{r}
+log.odds.comp = function(outcome_index, attribute_index_vector, df, test_df=NULL){
+  for(col in 1:length(df)){
+    df[,col] = as.factor(df[,col])
+    test_df[,col] = as.factor(test_df[,col])
+  }
+  
+  # convert columns
+  names = colnames(df)
+  outcome_name = names[outcome_index]
+  attributes = names[attribute_index_vector]
+  x = paste0(attributes, collapse="+")
+  form = paste(outcome_name, x, sep="~")
+  
+  # perform logistic regression
+  if(is.null(test_df)){
+    outcome = df[,outcome_index]
+  } else{
+    outcome = test_df[,outcome_index]
+  }
+  
+  
+  glm.fit = glm(form, data=df, family=binomial)
+  glm.probs = predict(glm.fit, newdata=test_df, type="response")
+  glm.pred = rep("0", length(outcome))
+  glm.pred[glm.probs > 0.5] = "1"
+  res = table(glm.pred, outcome)
+  acc = ((res[1,1]+res[2,2])/sum(res)) * 100
+  return(acc) # returns percent accuracy
+}
+```
+
+Now we will test some new combinations of accuracy.
+
+```{r}
+accuracys = c()
+for(i in 2:7){
+  ac = log.odds.comp(1, i, train_mirror)
+  accuracys = c(accuracys, ac)
+}
+single_atts = colnames(train_mirror)[2:7]
+single_accs = data.frame(Attribute=single_atts, Accuracy=accuracys)
+single_accs
+
+n = colnames(train_mirror)[which(max(accuracys) == accuracys)]
+print(paste("Attribute: ", n, ", Max Accuracy: ",  max(accuracys), sep=""))
+
+max_attributes = c(2)
+max_accuracy = 0
+values = c(2)
+
+for(i in 3:7){
+  for(j in i:7){
+    copy_max = rep(max_attributes)
+    attributes = c(copy_max, j)
+    accuracy = log.odds.comp(1, attributes, train_mirror)
+    if(accuracy > max_accuracy){
+      max_accuracy = accuracy
+      values = attributes
+    }
+  }
+  max_attributes = values
+}
+print(paste("Max Accuray: ", accuracy, sep=""))
+print(max_attributes)
+```
+
+Now we will train the logistic model with a larger data set by sampling from the same data. To do this we randomly draw data from the the exisiting table and creating a new table with more observations. There are two ways to do this, first we can create a copy table of the training data and then add observations randmomly selected from this pool. Or we can just randomly draw observations one at a time and build a new table from scratch. With either method, we will be using sampling with replacement, where observations drawn are placed back into an eligible pool. Lets use 2500 samples as our size. 
+
+Let's start with adding in the existing observations from train_mirror and more samples ontop of them.
+
+```{r}
+large_data_accuracies = numeric()
+for(i in 1:100){
+  sample_size = 2500-nrow(train_mirror)
+  index_vect = 1:nrow(train_mirror)
+  training_2500 = sample(index_vect, size=sample_size, replace=TRUE)
+  training_2500 = c(1:nrow(train_mirror), training_2500)
+  training_2500 = train_mirror[training_2500,]
+  
+  acc_larg = log.odds.comp(1, c(2,3,5,6), df=training_2500)
+  large_data_accuracies = c(large_data_accuracies, acc_larg)
+}
+print(mean(large_data_accuracies))
+```
+
+After conducting 100 runs we get an average accuracy of 79.0808%. Let us now do the same without including all the observations to start.
+
+```{r}
+large_data_scratch = numeric()
+for(i in 1:100){
+  row_vect = sample(1:nrow(train_mirror), size=2500, replace=TRUE)
+  train_2500 = train_mirror[row_vect, ]
+  
+  accuracy = log.odds.comp(1, c(2,3,5,6), df=train_2500)
+  large_data_scratch = c(large_data_scratch, accuracy)
+}
+print(mean(large_data_scratch))
+```
+
+We actually have a higher accuracy at 79.2192%. Let us use the higher accuracy method of building the data from scratch by selecting random rows of the data.
+
+```{r}
+size_vect = c(100, 500, 1000, 2500, 5000)
+runs = 100
+datum = train_mirror
+
+test = function(size_vect, runs, datum){
+  res_acc = numeric()
+  for(s in size_vect){
+    a = numeric()
+    for(i in 1:runs){
+      rows = sample(1:nrow(datum), size = s, replace = TRUE)
+      train = datum[rows, ]
+      ac = log.odds.comp(1, c(2,3,4,6), df=train)
+      a = c(a, ac)
+    }
+    res_acc = c(res_acc, mean(a))
+  }
+  return(res_acc)
+}
+
+test(size_vect, runs, datum)
+```
+
+This data is actually biased an not helpful for prediction. We see that smaller sample sizes have a higher accuracy. But keep in mind that his is actually being tested with the same data it was trained on. In order to assess the real accuracy of different sample sizes, we must create a test set different from the set used to train the model. Let us choose a fixed test size say 5000 observations randomly drawn with replacement from the training data.
+
+```{r}
+size_vect = c(1, 2, 5, 10)
+test_rows = sample(1:nrow(train_mirror), size=20000, replace=TRUE)
+test_dat = train_mirror[test_rows, ]
+#for(col in 1:ncol(test_dat)){
+#  test_dat[, col] = as.factor(test_dat[, col])
+#}
+
+res_accuracy = numeric()
+for(s in size_vect){
+  a = numeric()
+  for(i in 1:200){
+    train_rows = sample(1:nrow(train_mirror), size=s*nrow(train_mirror), replace=TRUE)
+    #print(length(train_rows))
+    train = train_mirror[train_rows, ]
+    train = rbind(train, train_mirror)
+    ac = log.odds.comp(1, c(2,3,4,6), df=train, test_df=test_dat)
+    a = c(a, ac)
+  }
+  res_accuracy = c(res_accuracy, mean(a))
+}
+print(res_accuracy)
+```
+
+```{r}
+a = numeric()
+for(i in 1:200){
+  ac = log.odds.comp(1, c(2,3,4,6), df=train_mirror, test_df=test_dat)
+  a = c(a, ac)
+}
+res_accuracy = c(mean(a), res_accuracy)
+size_vect = c(0, size_vect)
+```
+
+
+```{r}
+size_vect = size_vect+1
+plot(x=size_vect, y=res_accuracy, xlab="Sample Size Multiplier", ylab="Percent Accuracy Tested on 5000 Observations", type="l", main="% Accuracy vs. Training Sample Size Multiplier")
+```
+
+
+Based on this data we see that the 2x multiplier for sample size (~1400 samples) had the best accuracy nudging out the standard size data. For this run, we only see a 0.05% difference between the 2x and 3x size multipliers. So with either multiplier we will see similar results. Notice from the graph that increasining the sample size with random selection does improve accuracy, as compared to the standard 714 training samples. We also see that as the training sample gets larger, the accuracy steadily drops off. 
+
+So based on our testing so far, we want a training dataset that has 1428 samples and selects for Pclass, Sex, Age, and Parch. Using logistic regression with glm (generalized linear model), we get an approximate accuracy of 79%. Let's create our logistic model (glm_final_fit).
+
+```{r}
+rows = sample(1:nrow(train_mirror), size=nrow(train_mirror), replace=TRUE)
+train_logistic = train_mirror[rows, ]
+train_logistic = rbind(train_logistic, train_mirror)
+
+glm_final_fit = glm(Survived~Pclass+Sex+Age+Parch, data=train_logistic, family=binomial)
+```
+
+
+Linear Descriminant Analysis
+
+Now we will compare Linear Discriminant Analysis with the results we have obtaine with Logistic Regression. But first, we will summarize the ideas behind Linear Descriminant Analysis (LDA) and what advantages it has over Logisitc Regression.
+
+LDA intents create a decision boundary, based on Bayesian principles, that maximizes separability between classes. It is like PCA in that it reduces dimensionality, but also seeks to separate the classes well enough and create boundaries that can accurately classify a prediction. LDA achieves this maximum separability by increasing the distance between group means and, simultaneously, reducing dispersion or variance in a group. 
+
+Depending on the number of groups being classified, LDA reduces the dimensions/axis to one less than the number of groupss. For example, and in the case of the Titanic Data, we have Survived and Died groups. Both means can be considered as two points in P (number of variables) dimensional space. We can create a line using the two points in P-dimensional space and transform all observations onto this line/new axis. On this line we can define a boundary that separates these two groups and use that line to predict new observations. This is a very oversimplified explanation of LDA, but it follows a general procedure.
+
+In a statistics and math view, LDA uses concepts from probability, calculus, linear algebra, geometry, and more. From Linear Algebra, we are using the concepts of vector-matrix transformations of the surrounding space. We transform each point to a new space that maximizes separability of two groups (Survived and Died) of outcomes.
+
+In a statistics and probability view, we are defining a Bayesian Classifier that selects, based on the infromation/variables/predictors of each observation, which class it has the highest probability of belonging to. The Bayesian classfier for LDA defines the Posterior Probability for a given class K or Pr(Y=y|X=x), the probabily observation x belongs to class y as the Prior Probability multiplied with the Density Function of x at Y=y. The Prior Probability is the likelihood of selecting X=x from a sample or population. If we have a random sample to work from, we can just define this as x_K/n, where x_k is the number observations in the outcome class K and n is the total number of observations in the sample. The Density functions can either be uniquely defined, based on known distributions, or given many assumptions. In artificially generated models, we can make some assumptions such as normality or being Gaussian for each class K. However, working with real data is a lot messier.
+
+A bit aside with the classifier, let us assume that a p-dimensional random variable X has a multivariate Gaussian distribution, with a mean vector, mu or u, and a covariance matrix, sigma. The density function f(x) = (1/((2 x pi)^p/2 x |sigma|^1/2) x exp(-1/2(x-u)^T x sigma^-1(x-u)). This is essentially the denisty function for a normal curve with mean of u (vector) and variance of sigma (matrix). If we take the log of this expression, we have delta_K(x) = x^T x sigma^-1 x u_K - 1/2 x u^T_K x sigma^-1 x u_K + log(pi_K), where K defines the outcome class and T is the transpose of a matrix or vector. The log(pi_K) is the prior probability for class K, defined earlier. Delta(x) is the log of Posterior Probability function we defined earlier. We assign a p-dimensional x value to Y = k where the delta(x) is greatest. 
+
+I included the previous paragraph to show the math behind the Bayesian classifier from An Introduction to Statstical Learning by G.James, D.Witten et al. p. 138-149.
+
+Finally, LDA has several advantages to Logistic Regression, and these may apply to the Titanic data. One of which is that the Logistic Regression does not peform as well with highly separated classes. Another is that LDA performs just as well with a small sample size, n, and comparable number of predictors, p. Such as when p > n. Accurate boundaries can still be created with a small sample set. And third, LDA works well with more than 2 classes to define. Logistic regression can still work with many classes but has to be explicitely defined for each.
+
+
+
+
+Now let us get into the use of lda() function in the MASS package. This tool will help us determine a boundary for our Titanic Data and predict the Survival class for our training data. This function does the background calculations of our classifier, defining the boundary, estimating our class values such as mean vector and covariance matrix, and we can use the predict() function to predict new observations. We can further explain some of the functionality of lda() with the summary.
+
+```{r}
+install.packages("MASS")
+require(MASS)
+```
+
+For accurate comparison, we will use the same training set used previously for Logistic Regression called train_logistic. We will make a copy of this data and fit it with the lda() function.
+
+```{r}
+train_lda = train_logistic
+train = c(rows, 1:nrow(train_mirror))
+
+lda.fit = lda(Survived~Pclass+Sex+Age+Parch, data=train_lda, subset=train)
+
+lda.fit
+```
+
+With this summary of the LDA fit, we have some important infromation. To start, we see the Prior Probabilities for this training set of data for Survived (1) and Died (0). We see that for this particular sample, 60% died and 40% survived. This differs from the original training data since we decided to randomly select half the data from the original sample.
+
+Second, we can see group mean vectors for Survived and Died. From these vectors, we can see some hints about which predictors determined their respective groups. For Pclass, we see that on average, class 1-2 survived, while passengers of Class 3 tended to die. For Sex, we see that mean is closer to 0 (women) meaning on average more women survived as oppose to 1 (men) who tended to be grouped in died. Interestinly, we see that average age for both Survived and Died groups is similar being Adult 20-45. But we also see that the Survived group tended to have higher numbers of parents or children. 
+
+Lastly, we have the Coefficients of Linear Discriminants. LD1 can be represented geometrically as a new axis for which all the information from our observations are transformed. The values for this LD1 vector are multiplied with each respective predictor and the resulting number is a random variable X = x. From a linear algebra perspective, LD1 acts as a transformation vector that transforms a p-dimensional observation into the single axis LD1. This is done so by taking the dot product of the LD1 vector and the observation vector (Pclass, Sex, Age, Parch), such that we return a single numerical value for random variable X = x (Ex: -0.69736378 * Pclass + -2.23608761 * Sex + -0.19654772 * Age + 0.08390251 * Parch = x). If this value is close to 1, the observation is classified as Survived = 1, and, conversely, Died = 0, if close to 0. 
+
+For the starter case, we consider observations with x > 0.5 to have survived. 
+
+```{r}
+lda.pred = predict(lda.fit, train_mirror)
+names(lda.pred)
+
+lda.class = lda.pred$class
+lda.table = table(lda.class, train_mirror[,1])
+lda.table
+mean(lda.class==train_mirror[,1])
+```
+
+```{r}
+sum(lda.pred$posterior[,1] >= 0.5)
+sum(lda.pred$posterior[,1] < 0.5)
+sum(lda.pred$posterior[,1] > 0.9)
+```
+
+Above, we listed out the names for the list returned by predict(). Here we see class representing the class predictions of 0 or 1 for train_mirror based on the LDA classifier selecting the class with a probability over 0.5 We also see the Posterior Probabilities for 0 and 1 based on the equation we mentioned above. The posterior probability for class K is the product of the prior probability and density function for x at K, divided by the sum of this for all classes. The higher Posterior Probability for K assigns the observation to class K. We also have x from predict() which contains the linear descriminants, or the X = x values. 
+
+We see in the table, the columns represent the true values from train_mirror and the row values represent the predicted values from lda.fit. We can actually compute the Sensitivity and Specificity if we classify 0 (Died) as our null hypothesis and 1 (Survived) as our alternative hypothesis. Then,
+Sensitivity is the correct number of Died we predicted and Specificity is the correct number of Survived we predicted. 
+
+Addiitonally, we have False Positive (Type I Error) error being the observations that were supposed to be Died incorrectly classsified as Survived. And conversely, False Negative (Type II Error) as the observations that were suposed to be Survived classfified as Died.
+
+```{r}
+FP = lda.table[1,2]/sum(lda.table)
+FN = lda.table[2,1]/sum(lda.table)
+
+sensitivity = lda.table[2,2]/sum(lda.table[2,])
+specificity = 1-(FP)
+
+print(paste("False Positive: ", FP))
+print(paste("False Negatvie: ", FN))
+print(paste("Sensitivity: ", sensitivity))
+print(paste("Specificity: ", specificity))
+
+accuracy = sum(lda_table[1,1], lda_table[2,2])/sum(lda_table)
+print(paste("Accuracy: ", accuracy))
+```
+
+We have pretty high values for Sensitivity and Spcificity which is quite reassuring for our LDA model. We may want to tweak the values to increase the Sensitivity, classifying those who actually survived as Survived. In real world applications, this could help to discover any estranged passangers who were pressumed dead but actually survived. In fact, there was a WWI episode of Downton Abbey where a British veteran claimed he was the pressumed dead cousin of the Crawley family after the sinking of the Titanic. In modern day, this may help families discover the fate of lost members.
+
+Now, let us test the same model with a larger test dataset we used for Logistic Regression called test_dat. We will compare its accuracy with our best Logistic Regression model. Note, we will not be calculating any other statistics, just overall error rate to simplify the comparison. We may want to know the Sensitivity and Specificity later on in our final decsion between Logistic and LDA.
+
+```{r}
+lda_pred_final = predict(lda.fit, test_dat)
+names(lda_pred_final)
+
+lda_class = lda_pred_final$class
+lda_table = table(lda_class, test_dat[,1])
+lda_table
+```
+
+```{r}
+FP = lda_table[1,2]/sum(lda_table)
+FN = lda_table[2,1]/sum(lda_table)
+
+sensitivity = lda_table[2,2]/sum(lda_table[2,])
+specificity = 1-(FP)
+
+print(paste("False Positive: ", FP))
+print(paste("False Negatvie: ", FN))
+print(paste("Sensitivity: ", sensitivity))
+print(paste("Specificity: ", specificity))
+
+accuracy = sum(lda_table[1,1], lda_table[2,2])/sum(lda_table)
+print(paste("Accuracy: ", accuracy))
+```
+
+We have an overall accuracy of 78.375%. This is beat out by Logistic Regression by less than 1%. So the difference between both classifiers is small enough to be negligible and they are comparable in accuracy. Before we use these classifiers on the test data set to upload results to Kaggle, let us adjust the Posterior Probability threshold from 0.5 to various values above and below. It may also be easier to develop a function that calculates the accuracy more easily. We can also plot the results for each threshold.
+
+```{r}
+lda_accuracy_comp = function(data, null_vector, threshold){
+  TN = sum(data[null_vector >= threshold, 1] == 0) # TN
+  FP = sum(data[null_vector >= threshold, 1] == 1) # FP
+  TP = sum(data[null_vector < threshold, 1] == 1) # TP
+  FN = sum(data[null_vector < threshold, 1] == 0) # FN
+  
+  results_vect = c(TN,FP,FN,TP) # ordered by how a table would return results
+  
+  ac = (TN+TP)/(TN+FP+TP+FN)
+  results_vect = c(ac, results_vect)
+  return(results_vect)
+}
+```
+
+```{r}
+test_thresholds = (1:9)*0.1
+accuracy_vect = numeric()
+
+for(thresh in test_thresholds){
+  res = lda_accuracy_comp(test_dat, lda_pred_final$posterior[,1], threshold=thresh)
+  acc = res[1]
+  print(paste("Threshold: ", thresh, ", Accuracy: ", acc))
+  accuracy_vect = c(accuracy_vect, acc)
+}
+
+plot(x=test_thresholds, y=accuracy_vect, xlab="Thresholds", ylab="Accuracy by Percent", main="LDA Percent Accuracy Based on Posterior Probability Cutoff", type="l")
+```
+
+We see based on the results and graph above that a Posterior Probability threshold of 0.2 works pretty well for this data. It gives an overall accuracy close to 79% which is comparable to the accuracy given by Logistic Regression. We could use this threshold value for testing the data.
+
+As a brief conclusion to LDA, we find similar results between Logisitic and LDA. This is a bit reasurring and may indicate that separability is not an issue Logistic Regression struggles with this data set. Based on a cursory look, the passanger information for the Titanic is similar between the Survived and Died class. This may be related to the idea that during the sinking of the Titanic, the frenzy did not allow passengers to be adequately sorted based on their personal criteria and survival was a random chance with some having slight advantages over others. 
+
+Now we will use our glm_final_fit and lda_final_fit to fit with the test data provided by Kaggle and upload our results.
+
+```{r}
+test = read.csv("test.csv")
+test_clean = test[,c(1,2,4,5,7)]
+
+age = test_clean$Age
+
+years = rep(1, times=length(age))
+years[is.na(age)] = 0
+years[age >= 16 & age <= 30] = 2
+years[age >= 31 & age <= 45] = 3
+years[age >= 46 & age <= 60] = 4
+years[age >= 61] = 5
+
+mf = test_clean$Sex
+sex = rep(0, times=length(mf))
+sex[mf == "male"] = 1
+
+test_clean[,3] = sex
+test_clean[,4] = years
+```
+
+```{r}
+log.test = predict(glm_final_fit, test_clean, type="response")
+log.pred = rep(0, times=length(test_clean[,1]))
+log.pred[log.test > 0.5] = 1
+lda.test = predict(lda_final_fit, test_clean)
+lda_results = lda.test$class
+
+log.pred = as.integer(log.pred)
+lda_results = as.integer(lda_results)
+lda_results = as.integer(lda_results-1)
+
+log_df = data.frame(PassengerId=test_clean[,1], Survived=log.pred)
+lda_df = data.frame(PassengerId=test_clean[,1], Survived=lda_results)
+
+write.csv(log_df, file="log_results_el.csv", row.names=FALSE)
+write.csv(lda_df, file="lda_results_el.csv", row.names=FALSE)
+
+```
+
+After submitting to Kaggle, we got a 0.74162 for the Logistic Regression and 0.75119 for the LDA Regression.
