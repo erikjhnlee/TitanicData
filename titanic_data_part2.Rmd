@@ -1,0 +1,508 @@
+---
+title: "titanic_data_revised"
+author: "EL"
+date: "1/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+test = read.csv("test.csv")
+train = read.csv("train.csv")
+```
+
+```{r}
+train_clean = train[,c(2,3,5,6,7,8,10,12)]
+
+# convert age
+age = train_clean$Age
+years = rep(1, times=length(age))
+years[is.na(age)] = 0
+years[age > 0 & age <= 15] = 1
+years[age >= 16 & age <= 30] = 2
+years[age >= 31 & age <= 45] = 3
+years[age >= 46 & age <= 60] = 4
+years[age >= 61] = 5
+train_clean$Age = years
+
+# convert sex
+sex = train_clean$Sex
+mf = rep(0, times=length(sex))
+mf[sex == 'male'] = 1
+train_clean$Sex = mf
+
+# convert Embarked
+embark = train_clean$Embarked
+port = rep(0, times=length(embark))
+port[embark == 'C'] = 1
+port[embark == 'S'] = 2
+port[embark == 'Q'] = 3
+train_clean$Embarked = port
+
+# convert Fare
+fare = train_clean$Fare
+cost = rep(0, times=length(fare))
+cost[fare >= 0 & fare < 50.00] = 1
+cost[fare >= 50.00 & fare < 100.00] = 2
+cost[fare >= 100.00 & fare < 150.00] = 3
+cost[fare >= 150.00 & fare < 200.00] = 4
+cost[fare >= 200.00 & fare < 250.00] = 5
+cost[fare >= 250.00 & fare < 300.00] = 6
+cost[fare >= 300.00] = 7
+train_clean$Fare = cost
+```
+
+```{r}
+all_p = glm(formula=Survived~Pclass+Sex+Age+SibSp+Parch+Fare+Embarked, data=train_clean, family=binomial)
+summary(all_p)
+
+mod_p = glm(formula=Survived~Pclass+Sex+Age+SibSp+Parch, data=train_clean, family=binomial)
+summary(mod_p)
+```
+
+```{r}
+no_parch = glm(formula=Survived~Pclass+Sex+Age+SibSp+Fare+Embarked, data=train_clean, family=binomial)
+summary(no_parch)
+
+no_fare = glm(formula=Survived~Pclass+Sex+Age+SibSp+Parch+Embarked, data=train_clean, family=binomial)
+summary(no_fare)
+
+no_embarked = glm(formula=Survived~Pclass+Sex+Age+SibSp+Parch+Fare, data=train_clean, family=binomial)
+summary(no_embarked)
+```
+
+```{r}
+test_clean = test[,c(1,2,4,5,6,7,9,11)]
+
+# convert age
+age = test_clean$Age
+years = rep(1, times=length(age))
+years[is.na(age)] = 0
+years[age > 0 & age <= 15] = 1
+years[age >= 16 & age <= 30] = 2
+years[age >= 31 & age <= 45] = 3
+years[age >= 46 & age <= 60] = 4
+years[age >= 61] = 5
+test_clean$Age = years
+
+# convert sex
+sex = test_clean$Sex
+mf = rep(0, times=length(sex))
+mf[sex == 'male'] = 1
+test_clean$Sex = mf
+
+# convert Embarked
+embark = test_clean$Embarked
+port = rep(0, times=length(embark))
+port[embark == 'C'] = 1
+port[embark == 'S'] = 2
+port[embark == 'Q'] = 3
+test_clean$Embarked = port
+
+# convert Fare
+fare = test_clean$Fare
+cost = rep(0, times=length(fare))
+cost[fare >= 0 & fare < 50.00] = 1
+cost[fare >= 50.00 & fare < 100.00] = 2
+cost[fare >= 100.00 & fare < 150.00] = 3
+cost[fare >= 150.00 & fare < 200.00] = 4
+cost[fare >= 200.00 & fare < 250.00] = 5
+cost[fare >= 250.00 & fare < 300.00] = 6
+cost[fare >= 300.00] = 7
+test_clean$Fare = cost
+```
+
+
+```{r}
+log_pred = predict(all_p, newdata=test_clean, type="response")
+test_res = rep(0, times=length(log_pred))
+test_res[log_pred > 0.5] = 1
+res_df = data.frame(PassengerId=test_clean[,1], Survived=test_res)
+
+write.csv(res_df, file="all_p_el.csv", row.names=FALSE)
+```
+
+We recieved a result of 0.77 for accuracy. While this shows imporvement over our previous attemps, we want to try to get an accuracy of at least 0.8 or higher. To do this, we will start with variable selection by employing subset selection and shrinkage methods (ridge or lasso regression). This will help narrow the set of predictors we want for Survival. 
+
+A comment on the previous methods we used, we focused more on training error. Which while a decent predictor of test error, is not quite as accurate, especially as the number of predictors increases. Now, we want to gather estimates of test error in our prediction model and hope to minimize this for better results. We can use our previous Logistic and LDA models as a baseline comparison. We know that our Logistic model with Pclass+Sex+Age+SibSp+Parch+Fare+Embarked has a 0.77 accuracy. There may be variables in this group that add noise and hurt our test error.
+
+In order to predict test error, we will use common metrics such as Mallow's Cp, AIC or BIC, and adjusted R-squared. These metrics account for sample size, n, and number of predictors, p, usually adding penalties for too many noisy predictors. We will also employ validation and cross-validation, which accomplish two goals together. First it allows us to test our training data accuracy by testing on the training data that has NOT been used. And second, we can select out observations that are extreme or add noise to the model. Thus we get a cleaner training set and likewise more accurate prediction model.
+
+
+
+Subset Selection
+
+We begin with subset selection, which algorithmically selects in favor and against certain sets of variables in hopes of reducing the amount of training and test error from the data set. To simplify things, we have removed obvious descriptive variables from the training and test data such as PassgenerId, Name, Ticket, and Cabin. These entries are unique to the observation and will not provide any help to our predictive models. Note: the PassengerId for the test data is required for the final submission of the results to Kaggle.
+
+The are various types of subset selection such as Best Subset Selection, Forward Selection, Backward Selection, and a Hybrid Subset Selection. While we are only selecting 7 potential predictors and Best Subset Selection's computational strain is managable, it would total to 2^7 = 128 different combinations computed. If we performed a cross-validation 10 or so times we would have to go through 128x that number of iterations. Instead, we will be using a hybrid subset selection, which useds Forward and Backward selection and keeps the number of combinations low. This way if we wish to increase the number of iterations to stabilize our results, we can do so without worrying about computational load. This is also important for larger data sets.
+
+```{r}
+install.packages("leaps")
+require(leaps)
+```
+
+```{r}
+train_abbrev = train[, c(2,3,5,6,7,8,10,12)]
+
+best_sub = regsubsets(Survived~., data=train_clean, nvmax=10)
+summary(best_sub)
+```
+
+```{r}
+reg_summary = summary(best_sub)
+names(reg_summary)
+
+plot(best_sub, scale="adjr2")
+plot(best_sub, scale="Cp")
+plot(best_sub, scale="bic")
+```
+
+```{r}
+plot(reg_summary$adjr2, xlab="Number of Variables", ylab="Adjusted R-Sq", main="Best Subset with Adjusted R-Sq", type="l")
+max_adjR = which.max(reg_summary$adjr2)
+points(max_adjR, reg_summary$adjr2[max_adjR], col="cyan", cex=2, pch=20)
+
+
+plot(reg_summary$cp, xlab="Number of Variables", ylab="Mallow's Cp", main="Best Subset with Mallow's Cp", type="l")
+min_cp = which.min(reg_summary$cp)
+points(min_cp, reg_summary$cp[min_cp], col="green", cex=2, pch=20)
+
+
+plot(reg_summary$bic, xlab="Number of Variables", ylab="BIC", main="Best Subset with BIC", type="l")
+min_bic = which.min(reg_summary$bic)
+points(min_bic, reg_summary$bic[min_bic], col="blue", cex=2, pch=20)
+
+print("Adjusted R-Squared")
+coef(best_sub, max_adjR)
+print("Mallow's Cp")
+coef(best_sub, min_cp)
+print("BIC")
+coef(best_sub, min_bic)
+
+```
+
+After performing Best Subset Selection for the condensed data we have, we see that adjusted R-Squared, Cp, and BIC all select Pclass and Sex for a model with the best results. But they differ after that. Both adj-R and Cp select Age and SibSp. BIC also selects SibSp but not Age. And Adj-R also selects embarked. While these results are not conclusive nor concise, we can see that Pclass, Sex, and SibSp are a must. since 2/3 metrics choose Age, we will also include this, and conversely since Embarked is only selected by Adj-R, we will withhold that.
+
+Let us take a moment and run this same subset selection without the scaled values in Age, Fare, Embarked. We want to know if the same variables will still be selected without categorizing the values. This may also hurt some of the projections if we incorrectly categorize these predictors leading to skewed results. So this will help answer the question of whether to scale values of not. Note: Sex may remain as an integer as it is easier to compute and interpret 0 for female and 1 for male.
+
+```{r}
+reg_sub = regsubsets(Survived~., data=train_abbrev)
+summary(reg_sub)
+s = summary(reg_sub)
+```
+
+```{r}
+names(s)
+print(paste("Max Adj. R-Sq: ", which.max(s$adjr2)))
+print(paste("Min Cp: ", which.min(s$cp)))
+print(paste("Min BIC: ", which.min(s$bic)))
+
+plot(reg_sub, scale="adjr2")
+plot(reg_sub, scale="Cp")
+plot(reg_sub, scale="bic")
+```
+
+
+
+After reading the article from http://rstudio-pubs-static.s3.amazonaws.com/2897_9220b21cfc0c43a396ff9abf122bb351.html we see that for Logistic Regression, from the glm(), we need to use a different form of regular subsets called bestglm (best subset GLM) to apply to a Logistic model. The idea is the same but the library differs in that it works on GLM.
+
+```{r}
+install.packages("bestglm")
+require(bestglm)
+```
+
+```{r}
+titanic_bestglm = train_abbrev[, c(2,3,4,5,6,7,8,1)]
+colnames(titanic_bestglm)
+
+mf = rep(0, times=length(titanic_bestglm$Sex))
+mf[titanic_bestglm$Sex == 'male'] = 1
+titanic_bestglm$Sex = mf
+
+res_bestglm = bestglm(Xy=titanic_bestglm, family=binomial, IC="BIC", method="exhaustive")
+res_bestglm$BestModels
+
+summary(res_bestglm$BestModel)
+```
+
+Based on Best Subset Selection for a Logisic reression, we find that Pclass, Sex, Age, and SibSp are the best predictors providing lowest BIC and in turn indicates better performance for test data.
+
+```{r}
+titanic_clean_bglm = train_clean[, c(2,3,4,5,6,7,8,1)]
+
+res_clean_bglm = bestglm(Xy=titanic_clean_bglm, family=binomial, IC="BIC", method="exhaustive")
+res_clean_bglm$BestModels
+
+summary(res_clean_bglm$BestModel)
+```
+
+Based on running the model with scaled data, we see that the best selected Logistic model contains Pclass, Sex, and SibSp. However, this version has a larger BIC value of 839.6952 and the unscaled model has a BIC of 663.8887. This gives supporting evidence that the unscaled model may perform better on predicting the test set with Pclass, sex, Age, and SibSp. We will now try to perform cross validation on the top 3 models found with bestglm() and try to see which set will perform better.
+
+
+Cross-validation and Validation
+
+According to the documentation for bestglm() (type ?bestglm), we can not run cross-validation because "Cross-validation is not available when there are categorical variables since in this case it is likely that the training sample may not contain all levels and in this case we can't predict the response in the validation sample". This was true when we converted the categorical variables to numeric and tested on a random sample of the training data. And this may be true for when we try to cross-validate with Embarked or any other variable where a category with few observations will not be selected and trained on. For example, one passenger had a Parch of 6, and out of 891 training passengers, the chance of selecting this passanger for training is low and if the test data has another passenger with Parch of 6, the model would break.
+
+Lasso Regularisation 
+
+Now, we will implement Lasso Regularisation. This is a coefficient shrinkage technique that decreases the impact the predictors have on the response. This in turn will weaken the fit of the model to training data so that it has a better chance to fit test data. In other words, we increase bias to trade off for a significant drop in variance. Lasso does this by adding a lambda coefficient muliplied by the sum of the absolute values of a vector coefficient. 
+
+For Logistic Regression, we are trying to maximize likelihood, which is essentially the product of the probabilites for true positive results and true negative results. In the context of our titanic data, this means we want the maximum probability p(x) for the passangers who survived and minimum probability for passangers who died, 1-p(x). Taking the product of all these values gives us the maximum likelhiood, L. The closer these probabilities are to the truth, the higher L will be.
+
+With Lasso Regularisation, we are adding the lambda and sum of absolute coefficients to a modified version of the maximum likelihood, which minimizes the negative log likelihood. This L is defined as -log(maximum_likelihood). Essentially, the larger a number is, the larger the its log value will be. If we make this value negative, we are shrinking the value and thus minimizing. And the Log function will help scale this value for interpretatbility.
+
+Lasso and Ridge belong to a family for Regularisation that seeks to filter out noise predictors or variables and find the best set of signal variables associated to the response. Each methods approach will be slightly different, where Lasso takes the absolute value and Ridge squares and sums the coeffient with lambda. A combined version, known as Elastic Net, implements aspects of both of these methods by adding an alpha constant that signifies 0 as Ridge and 1 as Lasso. Any value in between will be a portion of both methods.
+
+With that cursory explanation of Lasso Regularisation, we will now implement it using a modified version of glmnet called cv.glmnet(). This function will accomplish two goals. First it will use cross validation to select and optimal lambda parameter amongs a whole matrix of different values. This is key for getting the best results for Lasso as it will give us the minimize our likelihood. And the second goal is to implement the Lasso Regression by adding an alpha constant. We will by default set this alpha constant to 1 to get a full Lasso Regularisation. We may test Ridge and Elastic versions to compare results.
+
+```{r}
+library(glmnet)
+```
+
+Since the test data has NA age cases, we are going to use a recoding technique to handle the NA cases. We need to do this because glmnet, specifically functions glmnet() and model.matrix() can not handle NA cases. If we want to use Lasso Regularisation, we need to handle the NA cases.
+
+This technique involves substituting the mean for Age in for the NA values. This will not affect the total mean for the column, but will result in a slight alteration to the standard of deviation due to changing of degrees of freedom. Further, this may affect our bias-variance tradeoff since the degrees of freedom will depend on our training set. But we need to handle the NA cases to make predictions.
+
+```{r}
+train_new = train_abbrev
+train_new$Age[is.na(train_new$Age)] = mean(train_new$Age, na.rm=TRUE)
+
+x = model.matrix(Survived~., train_new)
+y = train_abbrev$Survived
+cv.out = cv.glmnet(x, y, alpha=1, family="binomial", type.measure="mse")
+plot(cv.out)
+```
+
+```{r}
+lambda_min = cv.out$lambda.min
+lambda_1se = cv.out$lambda.1se
+coef(cv.out, s=lambda_1se)
+```
+
+```{r}
+coef(cv.out, s=lambda_min)
+```
+
+Notice that the 1se, one standard error, set of coefficients selects Pclass, Sex, Age, and EmbarkedC. This is different from what we found with unscaled bestglm() which selected Pclass, Sex, Age and SibSp. We will use both of these coefficients for their predicitons. We may also consider Ridge Regularisation since there are only 7 predictors to select from, so it may be okay to have very small coefficients for noise predictors.
+
+```{r}
+res_bestglm$BestModel$coefficients
+
+coef(cv.out, s=lambda_1se)
+```
+
+
+```{r}
+x = model.matrix(Survived~., train_new)[,-1]
+y = train_abbrev$Survived
+
+cv.out = cv.glmnet(x, y, alpha=1, family="binomial", type.measure="mse")
+
+test = read.csv("test.csv")
+pid = test[,1]
+test = test[, c(2,4,5,6,7,9,11)]
+test$Sex = ifelse(test$Sex == "male", 1, 0)
+test$Age[is.na(test$Age)] = mean(train_new$Age)
+
+Survived = rep(1, times=length(test$Age))
+test = cbind(Survived, test)
+
+EmbarkedC = ifelse(test$Embarked == "C", 1, 0)
+EmbarkedQ = ifelse(test$Embarked == "Q", 1, 0)
+EmbarkedS = ifelse(test$Embarked == "S", 1, 0)
+test = test[, -c(1,8)]
+test = cbind(test, EmbarkedC, EmbarkedQ, EmbarkedS)
+#tt = as.matrix(test)
+tt = data.matrix(test)
+#tt = model.matrix(~., test)[,-1]
+
+bestlam = cv.out$lambda.1se
+coef(cv.out, s=bestlam)
+lasso_probs = predict(cv.out, s=bestlam, newx=tt)
+lasso_pred = ifelse(lasso_probs > 0.5, 1, 0)
+#mean(lasso_pred == y)
+lasso_1se_res = data.frame(PassengerId=pid, Survived=lasso_pred)
+colnames(lasso_1se_res)[2] = "Survived"
+
+minlam = cv.out$lambda.min
+lasso_probs_2 = predict(cv.out, s=minlam, new=tt)
+lasso_pred_2 = ifelse(lasso_probs_2 > 0.5, 1, 0)
+table(lasso_pred, lasso_pred_2)
+lasso_min_res = data.frame(PassengerId=pid, Suvived=lasso_pred_2)
+colnames(lasso_min_res)[2] = "Survived"
+
+minlam_probs = predict(cv.out, s=minlam, new=x)
+minlam_pred = ifelse(minlam_probs > 0.5, 1, 0)
+mean(minlam_pred == y)
+
+selam_probs = predict(cv.out, s=bestlam, new=x)
+selam_pred = ifelse(selam_probs > 0.5, 1, 0)
+mean(selam_pred == y)
+
+#View(lasso_1se_res)
+#View(lasso_min_res)
+```
+
+
+Based on the data, we see that lasso_pred_2 which corresponds to the lambda with the minimum mse predicts 28 more Survived and 1 more Died compared to the 1se lambda.
+
+
+```{r}
+predict.regsubsets =function (object ,newdata ,id ,...){
+        form=as.formula(object$call [[2]])
+        mat=model.matrix(form,newdata)
+        coefi=coef(object ,id=id)
+        xvars=names(coefi)
+        mat[,xvars]%*%coefi
+}
+```
+
+```{r}
+titanic_bestglm$Age[which(is.na(titanic_bestglm$Age))] = mean(titanic_bestglm$Age, na.rm=TRUE)
+res_bestglm = bestglm(Xy=titanic_bestglm, family=binomial, IC="BIC", method="exhaustive")
+coefi = res_bestglm$BestModel$coefficients
+
+bias = as.numeric(coefi[1])
+vars = as.numeric(coefi[-1])
+
+x = titanic_bestglm[, c(1,2,3,4)]
+
+coefi
+bias
+vars
+
+
+res_vect = as.matrix(x)%*%as.numeric(vars)
+res_vect = res_vect + bias
+
+px = exp(res_vect)/(1+exp(res_vect)) 
+
+bestglm_results = ifelse(px > 0.5, 1, 0)
+
+table(bestglm_results, selam_pred)
+mean(bestglm_results==selam_pred)
+
+table(bestglm_results, minlam_pred)
+mean(bestglm_results == minlam_pred)
+```
+
+```{r}
+# bestglm logistic regression
+
+test = read.csv("test.csv")
+#View(test)
+
+test = test[, c(1,2,4,5,6,7,9,11)]
+#titanic_bestglm$Age[which(is.na(titanic_bestglm$Age))] = mean(titanic_bestglm$Age, na.rm=TRUE)
+
+# this sets an N/A Age entries as the mean as mean for titanic_bestglm mean
+test$Age[which(is.na(test$Age))] = mean(titanic_bestglm$Age, na.rm=TRUE)
+test$Sex = ifelse(test$Sex=="male", 1, 0)
+
+x = as.matrix(test[, c(2,3,4,5)])
+res = x%*%as.numeric(vars)
+res = res + bias
+px = exp(res)/(1+exp(res))
+
+bglm_res = ifelse(px > 0.5, 1, 0)
+bglm_df = data.frame(PassengerId=test$PassengerId, Survived=bglm_res)
+write.csv(bglm_df, file="bestglm_res.csv", row.names=FALSE)
+
+```
+
+```{r}
+# clean the training data
+train = read.csv("train.csv")
+train = train[, c(2,3,5,6,7,8,10,12)]
+
+train$Sex = ifelse(train$Sex=="male", 1, 0)
+train$Age[which(is.na(train$Age))] = mean(train$Age, na.rm=TRUE)
+EmbarkedC = ifelse(train$Embarked=="C", 1, 0)
+EmbarkedQ = ifelse(train$Embarked=="Q", 1, 0)
+EmbarkedS = ifelse(train$Embarked=="S", 1, 0)
+train = train[, -ncol(train)]
+train = cbind(train, EmbarkedC, EmbarkedQ, EmbarkedS)
+
+# clean the test data
+test = read.csv("test.csv")
+pid = test[, 1]
+test = test[, c(2,4,5,6,7,9,11)]
+test$Sex = ifelse(test$Sex=="male", 1, 0)
+test$Age[which(is.na(test$Age))] = mean(train$Age, na.rm=TRUE)
+test$Fare[which(is.na(test$Fare))] = mean(train$Fare, na.rm=TRUE)
+embkC = ifelse(test$Embarked=="C", 1, 0)
+embkQ = ifelse(test$Embarked=="Q", 1, 0)
+embkS = ifelse(test$Embarked=="S", 1, 0)
+test = test[, -ncol(test)]
+test = cbind(test, embkC, embkQ, embkS)
+lasso_test = as.matrix(test)
+
+# perform logistic lasso regression
+x = model.matrix(Survived~., train)[,-1]
+y = train$Survived
+
+lasso_out = cv.glmnet(x, y, alpha=1, family="binomial", type.measure="mse")
+coef(lasso_out, s=lasso_out$lambda.min)
+probs = predict(lasso_out, s=lasso_out$lambda.min, newx=lasso_test)
+lasso_pred = ifelse(probs > 0.5, 1, 0)
+
+table(lasso_pred, bglm_res)
+
+lasso_df = data.frame(PassengerId=pid, Survived=lasso_pred)
+colnames(lasso_df)[2] = "Survived"
+write.csv(lasso_df, file="lasso_res.csv", row.names=FALSE)
+
+```
+
+```{r}
+ridge_out = cv.glmnet(x, y, alpha=0, family="binomial", type.measure="mse")
+coef(ridge_out, s=ridge_out$lambda.min)
+probs = predict(ridge_out, s=ridge_out$lambda.min, newx=lasso_test)
+ridge_pred = ifelse(probs > 0.5, 1, 0)
+
+ridge_df = data.frame(PassengerId=pid, Survived=ridge_pred)
+colnames(ridge_df)[2] = "Survived"
+write.csv(ridge_df, file="ridge_res.csv", row.names=FALSE)
+```
+
+
+After submitting the bestglm and lasso logistic regressions we recieved 74% and 78% accuracy respectively for each. This however does not meet our desired level of accuracy of at least 80%. Let us try to employ a few more data cleaning techniques such as removing outliers and use Ridge regression, which takes into account all variables. While this may add slightly more noise, the important predictors may not be selected out.
+
+Lets check each predictor for outliers in the trining dataset.
+
+```{r}
+par(mfrow=c(2,3))
+boxplot(train$Pclass, ylab="Pclass")
+boxplot(train$Age, ylab="Age")
+boxplot(test$Age, ylab="Age")
+boxplot(test$SibSp, ylab="SibSp")
+boxplot(test$Parch, ylab="Parch")
+boxplot(test$Fare, ylab="Fare")
+
+old_par = par(mfrow=c(1,2))
+barplot(table(train$SibSp), main="SibSp")
+barplot(table(train$Parch), main="Parch")
+
+barplot(table(train$Fare), main="Fare")
+
+sum(train$SibSp > 2)
+sum(train$Parch > 2)
+sum(train$Fare > 300)
+
+mean(train$Age)
+mean(test$Age)
+
+```
+
+Based on some cursory analysis of boxplots, barplots, and predictor stats, we see that the means for the test and training data are very close with no outliers. We also see we have 15 observations with Parch > 2 and 46 observations with SibSp > 2. So we will not remove these larger values as it gives a broader range of values. However, we do see 3 that have Fare > 300. These people may have spend large amoutns of money. We can generate a barplot and dataset removing these outliers to see how our fit changes.
+
+```{r}
+boxplot(train$Fare[train$Fare < 500])
+
+train[train$Fare > 200, ]
+train[train$Fare > 300 & train$Fare < 500, ]
+```
+
